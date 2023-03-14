@@ -1,0 +1,20 @@
+{
+  "server": {
+    "host": "localhost",
+    "port": 8001,
+    "withlocalcache": false
+  },
+  "dbserver": {
+    "connectionLimit": 500,
+    "password": "root",
+    "user": "root",
+    "database": "pacs",
+    "host": "localhost"
+  },
+  "secret": {
+    "secret_key": "JWTappserver",
+    "secret_key_refresh": "RefreshJWTappserver",
+    "expires": 30,
+    "refresh_expires": 1800
+  }
+}

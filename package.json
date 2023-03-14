@@ -1,0 +1,29 @@
+{
+  "name": "auth-jwt",
+  "version": "1.0.0",
+  "description": "Node authentification server with MySQL and JWT",
+  "main": "index.js",
+  "scripts": {
+    "start":"node server.js"
+  },
+  "keywords": [
+    "Node",
+    "JWT",
+    "auth",
+    "MySQL"
+  ],
+  "author": "Radu Horia",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.3.2",
+    "bcrypt": "^5.1.0",
+    "config": "^3.3.9",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mysql": "^2.18.1",
+    "mysql-events": "^0.0.11",
+    "portscanner": "^2.2.0"
+  }
+}

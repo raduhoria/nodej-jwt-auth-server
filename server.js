@@ -4,8 +4,9 @@ const host = config.get('server.host');
 
 const cluster = require('cluster');
 const cCPUs = require('os').cpus().length;
+const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
 
-if (cluster.isMaster) {
+if (isPrimary) {
 	require('portscanner').checkPortStatus(port, host, function (error, status) {
 		if (status === 'open') {
 			console.log('Master server failed to start on port '+port+' due to port conflict');
@@ -38,15 +39,14 @@ if (cluster.isMaster) {
 	const terminate = require('./src/terminate');
 	const http = require('http');
 	const cors = require('cors')
-	const bodyParser = require('body-parser');
 	const express = require("express");
 	const apiRouter = require('./src/routes');
 	const testRouter = require('./test/test');
 	const app = express();
-	app.use(bodyParser.urlencoded({
+	app.use(express.urlencoded({
 		extended: true
 	}));
-	app.use(bodyParser.json());
+	app.use(express.json());
 	app.use(cors({
 		origin: '*',
 		credentials: true

@@ -1,177 +1,279 @@
-const config = require('config');
-const mysql = require('mysql');
+const bcrypt = require("bcrypt");
+const config = require("config");
+const MySQLEvents = require("@rodrigogs/mysql-events");
+const mysql = require("mysql2/promise");
+
+const db = {
+	cachedata: []
+};
+
 const pool = mysql.createPool({
-	connectionLimit: config.get('dbserver.connectionLimit'),    // the number of connections will node hold open to our database
-	password: config.get('dbserver.password'),
-	user: config.get('dbserver.user'),
-	database: config.get('dbserver.database'),
-	host: config.get('dbserver.host'),
-});
-pool.on('connection', function(connection) {
-	console.log('Connected to MySql database');
-});
-
-pool.on('error', function(err) {
-	console.log('Error connecting to mysql: '+err);
-	throw err;
+	connectionLimit: config.get("dbserver.connectionLimit"),
+	password: config.get("dbserver.password"),
+	user: config.get("dbserver.user"),
+	database: config.get("dbserver.database"),
+	host: config.get("dbserver.host"),
+	port: config.get("dbserver.port"),
+	waitForConnections: true
 });
 
-let db = {}; //create an empty object  that you will use later to write  and export your queries.
+const useLocalCache = () => Boolean(config.get("server.withlocalcache"));
+let cacheWatcher = null;
+let cacheWatcherStartPromise = null;
 
-db.getUsers = () =>{
-	return new Promise((resolve, reject)=>{
-		pool.query('SELECT * FROM users ', (error, results)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(results);
-		});
-	});
+const isBcryptHash = (value) => /^\$2[aby]\$\d{2}\$/.test(value || "");
+
+const normalizeUser = (user) => user || null;
+
+const updateCacheUser = (user) => {
+	if (!user || !user.id) {
+		return;
+	}
+
+	const foundIndex = db.cachedata.findIndex((item) => item.id === user.id);
+	if (foundIndex === -1) {
+		db.cachedata.push(user);
+		return;
+	}
+
+	db.cachedata[foundIndex] = user;
 };
 
-db.getUser = (id) =>{
-	if (config.get('server.withlocalcache')) {
-		let foundIndex = db.cachedata.findIndex(x => x.id == id);
-		if(foundIndex!=-1) {
-			//console.log('found user in local cache: '+foundIndex);
-			return db.cachedata[foundIndex];
+const removeCacheUser = (id) => {
+	const foundIndex = db.cachedata.findIndex((item) => item.id === id);
+	if (foundIndex !== -1) {
+		db.cachedata.splice(foundIndex, 1);
+	}
+};
+
+const applyCacheEvent = (event) => {
+	if (!event || event.table !== "users") {
+		return;
+	}
+
+	for (const row of event.affectedRows || []) {
+		if (event.type === "DELETE") {
+			removeCacheUser(row.before && row.before.id);
+			continue;
+		}
+
+		updateCacheUser(row.after);
+	}
+};
+
+const passwordMatches = async (candidatePassword, storedPassword) => {
+	if (!storedPassword) {
+		return false;
+	}
+
+	if (isBcryptHash(storedPassword)) {
+		return bcrypt.compare(candidatePassword, storedPassword);
+	}
+
+	return candidatePassword === storedPassword;
+};
+
+db.getUsers = async () => {
+	const [results] = await pool.query("SELECT * FROM users");
+	return results;
+};
+
+db.getUser = async (id) => {
+	if (useLocalCache()) {
+		const cached = db.cachedata.find((user) => user.id === id);
+		if (cached) {
+			return cached;
 		}
 	}
-	return new Promise((resolve, reject)=>{
-		pool.query('SELECT * from users where id=?', [id], (error, results)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(results[0]);
-		});
-	});
+
+	const [results] = await pool.query("SELECT * FROM users WHERE id = ?", [id]);
+	return normalizeUser(results[0]);
 };
 
-db.getUserByEmail = (email) =>{
-	if (config.get('server.withlocalcache')) {
-		let foundIndex = db.cachedata.findIndex(x => x.email == email);
-		if(foundIndex!=-1) {
-			//console.log('found user in local cache: '+foundIndex);
-			return db.cachedata[foundIndex];
+db.getUserByEmail = async (email) => {
+	if (useLocalCache()) {
+		const cached = db.cachedata.find((user) => user.email === email);
+		if (cached) {
+			return cached;
 		}
 	}
-	return new Promise((resolve, reject)=>{
-		pool.query('SELECT * from users where email=?', [email], (error, results)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(results[0]);
-		});
-	});
+
+	const [results] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
+	return normalizeUser(results[0]);
 };
 
-db.getUserByUsernameAndPassword = (username,password) =>{
-	if (config.get('server.withlocalcache')) {
-		let foundIndex = db.cachedata.findIndex(x => (x.email == username && x.password == password));
-		if(foundIndex!=-1) {
-			//console.log('found user in local cache: '+foundIndex);
-			return db.cachedata[foundIndex];
-		}
+db.getUserByUsernameAndPassword = async (username, password) => {
+	const user = await db.getUserByEmail(username);
+	if (!user) {
+		return null;
 	}
-	return new Promise((resolve, reject)=>{
-		pool.query('SELECT * from users where email=? and password=?', [username,password], (error, results)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(results[0]);
-		});
-	});
+
+	const matches = await passwordMatches(password, user.password);
+	return matches ? user : null;
 };
 
-db.updateUserRefreshToken = (id,refresh_token) =>{
-	if (config.get('server.withlocalcache')) {
-		let foundIndex = db.cachedata.findIndex(x => x.id == id);
-		if(foundIndex!=-1) {
-			//console.log('found user in local cache: '+foundIndex);
-			db.cachedata[foundIndex]['refresh_token'] = refresh_token;
-			return db.cachedata[foundIndex];
-		}
-	}
-	return new Promise((resolve, reject)=>{
-		pool.query('UPDATE users set refresh_token = ? where id = ?',	[refresh_token,id],	(error, result)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(result);
-		});
-	});
-};
-
-db.generateAccounts = () =>{
-	return new Promise((resolve, reject)=>{
-		var items = [];
-		for (var i = 0, count = 10000; i < count; i++) {
-			items.push({email:"radu.horia"+i+"@gmail.com",name:"Horia",password:"$2a$10$kzhZa7HUMzGq5Vhg3P71YuS8mhpbl.pDScjhOD7bgWCP9HHWm/ZTK",language:"ro",role:"user"});
-		}
-		pool.query('INSERT INTO users (email,name,password,language,role) VALUES ?',	[items.map(item => [item.email, item.name, item.password,item.language,item.role])],	(error, result)=>{
-			if(error){
-				return reject(error);
-			}
-			return resolve(result);
-		});
-	});
-};
-
-var setCachedData = async (db) => {
-	var MySQLEvents = require('mysql-events');
-	var dsn = {
-		host: config.get('dbserver.host'),
-		user: config.get('dbserver.user'),
-		password: config.get('dbserver.password')
-	};
-	var mysqlEventWatcher = MySQLEvents(dsn);
-	db.cachedata = JSON.parse(JSON.stringify(await db.getUsers()));
-	//console.log(db.cachedata);
-	var watcher = mysqlEventWatcher.add(
-		config.get('dbserver.database') + '.users',
-		function (oldRow, newRow, event) {
-			//row inserted
-			if (oldRow === null) {
-				console.log('Table users inserted');
-				//console.log(newRow);
-				db.cachedata.push({
-					id: newRow.fields['id'],
-					created_date: newRow.fields['created_date'],
-					active_account: newRow.fields['active_account'],
-					email: newRow.fields['email'],
-					name: newRow.fields['name'],
-					password: newRow.fields['password'],
-					language: newRow.fields['language'],
-					role: newRow.fields['role'],
-					refresh_token: newRow.fields['refresh_token']
-				});
-			}
-
-			//row deleted
-			if (newRow === null) {
-				console.log('Table users deleted');
-				let foundIndex = db.cachedata.findIndex(x => x.id == oldRow.fields['id']);
-				db.cachedata.splice(foundIndex,1);
-				//console.log(db.cachedata[foundIndex]);
-			}
-
-			//row updated
-			if (oldRow !== null && newRow !== null) {
-				console.log('Table users updated');
-				var foundIndex = db.cachedata.findIndex(x => x.id == oldRow.fields['id']);
-				oldRow.changedColumns.forEach(function(element){
-					db.cachedata[foundIndex][element] = newRow.fields[element];
-				});
-				//console.log(db.cachedata[foundIndex]);
-			}
-			//detailed event information
-			//console.log(event)
-		},
-		null
+db.updateUserRefreshToken = async (id, refresh_token) => {
+	const [result] = await pool.query(
+		"UPDATE users SET refresh_token = ? WHERE id = ?",
+		[refresh_token, id]
 	);
+
+	if (useLocalCache()) {
+		const user = await db.getUser(id);
+		if (user) {
+			user.refresh_token = refresh_token;
+			updateCacheUser(user);
+		}
+	}
+
+	return result;
 };
 
-if (config.get('server.withlocalcache')) { // with cache
-	setCachedData(db);
+db.ensureUsersTable = async () => {
+	await pool.query(`
+		CREATE TABLE IF NOT EXISTS users (
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			email VARCHAR(255) NOT NULL UNIQUE,
+			name VARCHAR(255),
+			password VARCHAR(255) NOT NULL,
+			language VARCHAR(10),
+			role VARCHAR(50) DEFAULT 'user',
+			refresh_token TEXT
+		)
+	`);
+};
+
+db.seedTestUser = async ({
+	email = "demo@example.com",
+	name = "Demo User",
+	password = "DemoPass123!",
+	language = "en",
+	role = "user"
+} = {}) => {
+	await db.ensureUsersTable();
+
+	const passwordHash = await bcrypt.hash(password, 10);
+	await pool.query(
+		`INSERT INTO users (email, name, password, language, role, refresh_token)
+		 VALUES (?, ?, ?, ?, ?, NULL)
+		 ON DUPLICATE KEY UPDATE
+			name = VALUES(name),
+			password = VALUES(password),
+			language = VALUES(language),
+			role = VALUES(role),
+			refresh_token = NULL`,
+		[email, name, passwordHash, language, role]
+	);
+
+	const [users] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
+	const user = normalizeUser(users[0]);
+	updateCacheUser(user);
+
+	return {
+		id: user.id,
+		email,
+		name,
+		language,
+		role,
+		password
+	};
+};
+
+db.generateAccounts = async () => {
+	const passwordHash = await bcrypt.hash("DemoPass123!", 10);
+	const items = [];
+
+	for (let i = 0, count = 10000; i < count; i++) {
+		items.push({
+			email: `radu.horia${i}@gmail.com`,
+			name: "Horia",
+			password: passwordHash,
+			language: "ro",
+			role: "user"
+		});
+	}
+
+	const [result] = await pool.query(
+		"INSERT INTO users (email, name, password, language, role) VALUES ?",
+		[items.map((item) => [item.email, item.name, item.password, item.language, item.role])]
+	);
+
+	return result;
+};
+
+db.refreshCache = async () => {
+	db.cachedata = JSON.parse(JSON.stringify(await db.getUsers()));
+	return db.cachedata;
+};
+
+db.startCacheWatcher = async () => {
+	if (!useLocalCache() || cacheWatcher) {
+		return;
+	}
+
+	if (cacheWatcherStartPromise) {
+		return cacheWatcherStartPromise;
+	}
+
+	cacheWatcherStartPromise = (async () => {
+		await db.refreshCache();
+
+		cacheWatcher = new MySQLEvents(
+			{
+			host: config.get("dbserver.host"),
+			user: config.get("dbserver.user"),
+			password: config.get("dbserver.password"),
+			port: config.get("dbserver.port")
+		},
+			{
+				startAtEnd: true
+			}
+		);
+
+		await cacheWatcher.start();
+
+		cacheWatcher.addTrigger({
+			name: "users-cache",
+			expression: `${config.get("dbserver.database")}.users`,
+			statement: MySQLEvents.STATEMENTS.ALL,
+			onEvent: applyCacheEvent
+		});
+
+		cacheWatcher.on(MySQLEvents.EVENTS.CONNECTION_ERROR, (error) => {
+			console.error("MySQL cache watcher connection error:", error.message);
+		});
+
+		cacheWatcher.on(MySQLEvents.EVENTS.ZONGJI_ERROR, (error) => {
+			console.error("MySQL cache watcher binlog error:", error.message);
+		});
+	})();
+
+	try {
+		await cacheWatcherStartPromise;
+	} finally {
+		cacheWatcherStartPromise = null;
+	}
+};
+
+db.stopCacheWatcher = () => {
+	if (!cacheWatcher) {
+		return;
+	}
+
+	cacheWatcher.stop();
+	cacheWatcher = null;
+	cacheWatcherStartPromise = null;
+};
+
+db.close = async () => {
+	db.stopCacheWatcher();
+	await pool.end();
+};
+
+if (useLocalCache()) {
+	db.startCacheWatcher().catch((error) => {
+		console.error("Failed to start local users cache watcher:", error.message);
+	});
 }
-module.exports = db
+
+module.exports = db;
